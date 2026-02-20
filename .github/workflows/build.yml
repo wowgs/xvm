@@ -1,0 +1,77 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 13.0.0.0067)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Build XVM
+        run: docker build --platform linux/amd64 -t xvm-build .
+
+      - name: Extract build artifacts
+        run: |
+          CID=$(docker create xvm-build)
+          docker cp "$CID:/build/~output/deploy/" ./deploy/
+          docker rm "$CID"
+
+          # Find the .wotmod
+          WOTMOD=$(find ./deploy -name "com.modxvm.xvm*.wotmod" -type f | head -1)
+          if [ -z "$WOTMOD" ]; then
+            echo "ERROR: XVM .wotmod not found"
+            exit 1
+          fi
+          cp "$WOTMOD" ./xvm.wotmod
+          echo "XVM wotmod: $(wc -c < ./xvm.wotmod) bytes"
+
+      - name: Package ReloadTimer build dependencies
+        run: |
+          mkdir -p rt-deps/rabcdasm rt-deps/build-inputs
+
+          # Vanilla SWF (from source tree)
+          cp src/xvm_actionscript/swf_wg/battleVehicleMarkersApp.swf \
+             rt-deps/build-inputs/battleVehicleMarkersApp_vanilla.swf
+
+          # rabcdasm binaries (from source tree)
+          cp src_build/bin/linux_amd64/rabcdasm/abcexport \
+             src_build/bin/linux_amd64/rabcdasm/abcreplace \
+             src_build/bin/linux_amd64/rabcdasm/rabcasm \
+             src_build/bin/linux_amd64/rabcdasm/rabcdasm \
+             rt-deps/rabcdasm/
+
+          # playerglobal.swc (from source tree)
+          cp src_build/royale_toolchain/libs/adobe_playerglobal/10.2/playerglobal.swc \
+             rt-deps/build-inputs/playerglobal.swc
+
+          tar czf rt-build-deps.tar.gz -C rt-deps .
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+          fi
+          TAG="v${VERSION}"
+
+          # Delete existing release/tag if it exists
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+
+          gh release create "$TAG" xvm.wotmod rt-build-deps.tar.gz \
+            --title "XVM ${VERSION}" \
+            --notes "Built from commit $(git rev-parse --short HEAD)"
