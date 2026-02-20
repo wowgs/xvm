@@ -1,0 +1,65 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_sync: ${{ steps.compare.outputs.needs_sync }}
+    steps:
+      - name: Compare upstream vs our base
+        id: compare
+        run: |
+          # Get latest upstream SHA from GitLab API (no clone needed)
+          UPSTREAM=$(curl -sf "https://gitlab.com/api/v4/projects/xvm%2Fxvm/repository/branches/master" \
+            | jq -r '.commit.id')
+
+          # Get our base commit (HEAD~2) from GitHub API
+          COMMITS=$(curl -sf -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/commits?per_page=3")
+          OUR_BASE=$(echo "$COMMITS" | jq -r '.[2].sha')
+
+          echo "Upstream: $UPSTREAM"
+          echo "Our base: $OUR_BASE"
+
+          if [ "$UPSTREAM" = "$OUR_BASE" ]; then
+            echo "Already up to date."
+            echo "needs_sync=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream has new commits."
+            echo "needs_sync=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  sync:
+    needs: check
+    if: needs.check.outputs.needs_sync == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebase on upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://gitlab.com/xvm/xvm.git
+          git fetch upstream master
+
+          echo "Rebasing our commits on upstream/master..."
+          git rebase upstream/master
+          git push --force-with-lease
+
+      - name: Trigger build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml
